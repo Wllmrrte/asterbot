@@ -1,7 +1,10 @@
 import asyncio
 import random
 from telethon.sync import TelegramClient
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, MessageIdInvalidError, MessageNotFoundError
+from telethon import events
+import os
+from datetime import datetime, timedelta
 
 # Configuración del cliente
 API_ID = 9161657
@@ -24,6 +27,11 @@ EXCLUDED_GROUPS = [
     "�𝙏𝘼𝙁𝙁 𝘿𝙀 𝙇𝙊𝙎 𝙂𝙍𝙐𝙋𝙊𝙎"
 ]
 
+# Memoria de mensajes enviados para controlar el límite
+message_memory = {}
+MESSAGE_LIMIT = 4  # Máximo de mensajes automáticos por usuario
+MESSAGE_TIMEOUT = timedelta(hours=24)  # Tiempo para reiniciar el contador
+
 async def reconnect(client):
     """Intentar reconectar automáticamente si la conexión se pierde."""
     while not client.is_connected():
@@ -33,6 +41,38 @@ async def reconnect(client):
         except Exception as e:
             print(f"Reconexión fallida: {e}. Reintentando en 5 segundos...")
             await asyncio.sleep(5)
+
+@events.register(events.NewMessage(incoming=True))
+async def handle_new_private_message(event):
+    """Responde automáticamente a nuevos mensajes privados."""
+    if event.is_private:
+        user_id = event.sender_id
+        now = datetime.now()
+
+        # Revisar si el usuario está en la memoria
+        if user_id in message_memory:
+            last_sent, message_count = message_memory[user_id]
+
+            # Verificar si ha pasado el tiempo límite
+            if now - last_sent > MESSAGE_TIMEOUT:
+                message_memory[user_id] = (now, 1)  # Reiniciar contador
+            elif message_count >= MESSAGE_LIMIT:
+                print(f"Límite de mensajes alcanzado para {user_id}")
+                return
+            else:
+                message_memory[user_id] = (now, message_count + 1)
+        else:
+            message_memory[user_id] = (now, 1)  # Agregar nuevo usuario
+
+        try:
+            await event.reply(
+                "**Hola!** 😊 **Clickeame y escríbeme a mi perfil principal para atenderte de inmediato!**\n\n"
+                "[👉 **Haz clic aquí abajo** 👇](https://t.me/Asteriscom)",
+                link_preview=True
+            )
+            print(f"Mensaje automático enviado a {user_id}")
+        except Exception as e:
+            print(f"Error al enviar mensaje automático a {user_id}: {e}")
 
 async def send_messages_to_groups(client):
     """Reenvía mensajes desde el grupo 'spam bot' a otros grupos."""
@@ -56,16 +96,17 @@ async def send_messages_to_groups(client):
         await reconnect(client)  # Asegurarse de estar conectado
         async for dialog in client.iter_dialogs():
             if dialog.is_group and dialog.name == SPAM_GROUP_NAME:
-                async for message in client.iter_messages(dialog, limit=10):
+                async for message in client.iter_messages(dialog):
                     for group_id in group_ids:
                         try:
-                            await client.forward_messages(group_id, [message])
+                            await client.forward_messages(group_id, message)
                             group_name = (await client.get_entity(group_id)).title
                             print(f"\033[92mMensaje reenviado al grupo {group_name}\033[0m")
                             await client.send_message(control_group_id, f"Mensaje reenviado a: {group_name}")
-                        except FloodWaitError as e:
-                            print(f"\033[91mDemasiados mensajes enviados. Esperando {e.seconds} segundos...\033[0m")
-                            await asyncio.sleep(e.seconds)
+                        except (FloodWaitError, MessageIdInvalidError, MessageNotFoundError) as e:
+                            print(f"\033[91mError reenviando mensaje: {e}\033[0m")
+                            if isinstance(e, FloodWaitError):
+                                await asyncio.sleep(e.seconds)
                         except Exception as e:
                             print(f"\033[91mError al reenviar mensaje al grupo {group_id}: {e}\033[0m")
                             await client.send_message(control_group_id, f"Error al reenviar mensaje al grupo {group_id}.")
@@ -83,6 +124,7 @@ async def main():
             await client.sign_in(PHONE_NUMBER, input("Ingresa el código enviado a tu teléfono: "))
 
         print("Bot conectado exitosamente.")
+        client.add_event_handler(handle_new_private_message)
         await send_messages_to_groups(client)
 
 if __name__ == "__main__":
